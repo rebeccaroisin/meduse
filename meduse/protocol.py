@@ -7,53 +7,86 @@ FOLLOWER = 1
 CANDIDATE = 2
 LEADER = 3
 
-## Factories to connect to the other raft peers
-
-class PeerClientFactory(protocol.ClientFactory):
-    def __init__(self, upper_factory):
-        self.factory = upper_factory
-
-    def startedConnecting(self, connector):
-        print 'Started to connect.'
-
-    def buildProtocol(self, addr):
-        print 'Connected.'
-        return MeduseProtocol(self.factory)
-
-    def clientConnectionLost(self, connector, reason):
-        print 'Lost connection.  Reason:', reason
-
-    def clientConnectionFailed(self, connector, reason):
-        print 'Connection failed. Reason:', reason
-
 ## An instance of the raft server
-
-class MeduseProtocol(protocol.Protocol):
-
+class MeduseLeaderProtocol(protocol.Protocol):
 
     def __init__(self, factory):
         self.factory = factory
         self.buffer = ""
 
+    def connectionMade(self):
+        assert self.factory.state == CANDIDATE
+        (log_term, log_index, _) = self.factory.get_last_log()
+        msg = ("RequestVote", self.factory.current_term, self.factory.name, log_index, log_term)
+        self.transport.write(str(msg))
+
+    def dataReceived(self, data):
+        data = eval(data)
+        if data[0] == "ReplyVote":
+            _, other_term, vote = data
+
+            # If we are behind in terms become follower again
+            print other_term, self.factory.current_term
+            if other_term > self.factory.current_term:
+                self.factory.back_to_follower()
+                self.factory.set_persistant(other_term, None)
+                return
+
+            # Add a vote
+            if vote:
+                self.factory.votes += 1
+                if self.factory.votes > len(self.factory.others) / 2:
+                    self.factory.start_leader()
+
+
+
+## Factories to connect to the other raft peers
+class LeaderClientFactory(protocol.ClientFactory):
+
+    def __init__(self, upper_factory):
+        self.factory = upper_factory
+        self.noisy = False
+
+
+    def buildProtocol(self, addr):
+        print 'Connected.'
+        c = MeduseLeaderProtocol(self.factory)
+        self.factory.conn += [c]
+        return c
+
+
+    def clientConnectionLost(self, connector, reason):
+        print "Gone"
+        if self.factory.state == LEADER:
+            print 'Lost connection.  Reason:', reason, connector
+
+
+## An instance of the raft server
+class MeduseProtocol(protocol.Protocol):
+
+    def __init__(self, factory):
+        self.factory = factory
+        self.buffer = ""
 
     def dataReceived(self, data):
         ## When we receive data by a candidate or leader back off our own timer
         self.factory.reset_election_timeout()
 
+        data = eval(data)
+
         if data[0] == "RequestVote":
             # Parse incoming message
             _, term, candidateID, lastLogIndex, lastLogTerm = data
 
+            # Go back to follower
             if term > self.factory.current_term:
-
-                self.factory.state = FOLLOWER
-                self.factory.voted_for = None
+                self.factory.back_to_follower()
                 self.factory.set_persistant(term, None)
 
 
             # If old epoch, do not grant vote and send new epoch
             if term < self.factory.current_term:
-                outmsg = (self.factory.current_term, False)
+                outmsg = ("ReplyVote", self.factory.current_term, False)
                 self.transport.write(str(outmsg))
                 return
 
@@ -64,18 +97,19 @@ class MeduseProtocol(protocol.Protocol):
 
                 self.factory.set_persistant(term, candidateID)
 
-                outmsg = (term, True)
+                outmsg = ("ReplyVote", term, True)
                 self.transport.write(str(outmsg))
                 return
 
             # Otherwise refuse the vote
-            outmsg = (self.factory.current_term, False)
+            outmsg = ("ReplyVote", self.factory.current_term, False)
             self.transport.write(str(outmsg))
             return
 
 
         elif data[0] == "AppendEntries":
-            assert False
+            pass
+
         else:
             assert False
 
@@ -84,6 +118,12 @@ class MeduseProtocol(protocol.Protocol):
 class MeduseFactory(protocol.Factory):
     
     def __init__(self, name, reactor=reactor):
+        self.others = []
+        self.conn = []
+        self.votes = None
+
+        self.LeaderFactory = LeaderClientFactory(self)
+
         self.name = name
         self.reactor = reactor
 
@@ -108,9 +148,10 @@ class MeduseFactory(protocol.Factory):
 
         ## Leader State
         self.next_index = None
-        self.matched_index = None
+        self.match_index = None
 
         ## Timers
+        self.heartbeat_timeout = None
         self.election_timeout = None
         self.reset_election_timeout()
 
@@ -130,22 +171,82 @@ class MeduseFactory(protocol.Factory):
 
 
     def reset_election_timeout(self):
-        if self.election_timeout is not None:
-            self.election_timeout.cancel()
+        if self.state == FOLLOWER or self.state == CANDIDATE:
+            if self.election_timeout is not None:
+                self.election_timeout.cancel()
 
-        self.election_timeout = self.reactor.callLater(random.randint(150, 300) / 1000.0 , self.start_leader)
+            self.election_timeout = self.reactor.callLater(random.randint(150, 300) / 1000.0 , self.start_leader_election)
 
 
-    def start_leader(self):
+    def back_to_follower(self):
+        print "Back to follower"
+        self.state = FOLLOWER
+        self.votes = None
+
+        ## Cancel all connections
+        while len(self.conn) > 0:
+            c = self.conn.pop()
+            c.transport.loseConnection()
+
+        ## Reset election timeout
+        self.reset_election_timeout()
+
+
+    def start_leader_election(self):
         print "Starting Election"
         
+        ## In case the election takes too long, we move forward
+        #  that happens in case of split votes.
         self.election_timeout = None
+        self.reset_election_timeout()
+
+        ## 
         self.state = CANDIDATE
         self.set_persistant(self.current_term + 1, self.name)
+        self.votes = 1
+
+        # self.conn = []
+        for (host, port, name) in self.others:
+            reactor.connectTCP(host, port, self.LeaderFactory)
+
+
+    def reset_heartbeat(self):
+        if self.state == LEADER:
+            if self.heartbeat_timeout is not None:
+                self.heartbeat_timeout.cancel()
+
+            self.heartbeat_timeout = self.reactor.callLater(25 / 1000.0 , self.send_heartbeat)
+
+
+    def send_heartbeat(self):
+        self.heartbeat_timeout = None
+
+        (log_term, log_index, _) = self.get_last_log()
+        msg = ("AppendEntries", self.current_term, self.name, log_index, log_term, [], log_index)
+
+        for c in self.conn:            
+            c.transport.write(str(msg))
+
+        self.reset_heartbeat()
+
+    def start_leader(self):
+        print "I am legend."
+        # Cancel the time-out, we made it to leader
+        if self.election_timeout is not None:
+            self.election_timeout.cancel()
+        self.election_timeout = None
+
+        ## Set the heartbeats
+        self.state = LEADER
+        self.reset_heartbeat()
+
+        # Initialize your view of the others
+        (log_term, log_index, _) = self.get_last_log()
+        self.next_index = [log_index] * len(self.others)
+        self.match_index = [-1] * len(self.others)
 
 
     def set_persistant(self, term, vote):
-
         self.current_term = term
         self.voted_for = vote
 
@@ -211,7 +312,10 @@ def test_election_timeout():
     os.remove("node0_term.txt")
 
 
-def test_election_handling():
+import mock
+
+@mock.patch('twisted.internet.reactor.connectTCP')
+def test_election_handling(mock_reactor):
     clock = Clock()
     
     factory = MeduseFactory("node0", reactor=clock)
@@ -224,14 +328,70 @@ def test_election_handling():
     for _ in range(100):
         clock.advance(0.1)
         instance.dataReceived(("RequestVote", 50, 0, 0, 0))
-        assert tr.value() == str((100, False))
+        assert tr.value() == str(("ReplyVote", 100, False))
         tr.clear()
+
+    # Define some others
+    factory.others = [(1,1, "Node1"), (2,2, "Node2")]
 
     # Ensure newer terms cancel all states back to follower
     clock.advance(1)
+    assert len(mock_reactor.call_args_list) == 2
+
     assert factory.state == CANDIDATE
     instance.dataReceived(("RequestVote", 150, 128, 0, 0))
 
     assert factory.state == FOLLOWER
     assert factory.voted_for == 128
-    assert tr.value() == str((150, True))
+    assert tr.value() == str(("ReplyVote", 150, True))
+
+    if os.path.exists("node0_voted.txt"):
+        os.remove("node0_voted.txt")
+    
+    if os.path.exists("node0_term.txt"):
+        os.remove("node0_term.txt")
+
+
+def test_leader_client():
+    clock = Clock()
+    
+    factory = MeduseFactory("node0", reactor=clock)
+    factory.start_leader_election()
+    client_factory = LeaderClientFactory(factory)
+
+    instance = client_factory.buildProtocol(None)
+    tr = proto_helpers.StringTransport()
+    instance.makeConnection(tr)
+
+    print tr.value()
+    instance.dataReceived(str(("ReplyVote", 0, True)))
+    print "Votes", factory.votes
+    assert factory.state == LEADER
+
+    if os.path.exists("node0_voted.txt"):
+        os.remove("node0_voted.txt")
+    
+    if os.path.exists("node0_term.txt"):
+        os.remove("node0_term.txt")
+
+def test_leader_backoff():
+    clock = Clock()
+    
+    factory = MeduseFactory("node0", reactor=clock)
+    factory.start_leader_election()
+    client_factory = LeaderClientFactory(factory)
+
+    instance = client_factory.buildProtocol(None)
+    tr = proto_helpers.StringTransport()
+    instance.makeConnection(tr)
+
+    print tr.value()
+    instance.dataReceived(str(("ReplyVote", 10, False)))
+    print "Votes", factory.votes
+    assert factory.state == FOLLOWER
+
+    if os.path.exists("node0_voted.txt"):
+        os.remove("node0_voted.txt")
+    
+    if os.path.exists("node0_term.txt"):
+        os.remove("node0_term.txt")
