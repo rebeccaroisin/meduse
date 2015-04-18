@@ -217,13 +217,14 @@ class MeduseFactory(protocol.Factory):
 
 
     def reset_heartbeat(self):
-        #print "state (hb) = ", self.state
         if self.state == LEADER:
-            if self.heartbeat_timeout is not None:
+            if self.heartbeat_timeout is not None and self.heartbeat_timeout.active():
                 self.heartbeat_timeout.cancel()
 
+            print "Reset heartbeat"
             self.heartbeat_timeout = self.reactor.callLater(25 / 1000.0 , self.send_heartbeat)
-            #print "state (hb) = ", self.state
+        else:
+            raise Exception("I am not the leader")
 
 
     def send_heartbeat(self):
