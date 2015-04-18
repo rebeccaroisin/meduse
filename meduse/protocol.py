@@ -22,7 +22,8 @@ class MeduseLeaderProtocol(protocol.Protocol):
         self.transport.write(str(msg))
 
     def dataReceived(self, data):
-        data = eval(data)
+        data = eval(data) # BAD BAD BAD
+
         if data[0] == "ReplyVote":
             _, other_term, vote = data
 
@@ -38,6 +39,17 @@ class MeduseLeaderProtocol(protocol.Protocol):
                 self.factory.votes += 1
                 if self.factory.votes > len(self.factory.others) / 2:
                     self.factory.start_leader()
+
+        elif data[0] == "ReplyAppendEntries":
+            _, other_term, success = data
+
+            print other_term, self.factory.current_term
+            if other_term > self.factory.current_term:
+                self.factory.back_to_follower()
+                self.factory.set_persistant(other_term, None)
+                return
+
+            ## TODO
 
 
 
@@ -192,6 +204,10 @@ class MeduseFactory(protocol.Factory):
             c.transport.loseConnection()
 
         ## Reset election timeout
+        if self.heartbeat_timeout is not None and self.heartbeat_timeout.active():
+            self.heartbeat_timeout.cancel()
+            self.heartbeat_timeout = None
+
         self.reset_election_timeout()
 
 
@@ -435,10 +451,10 @@ def test_leader_heartbeat():
     print factory.election_timeout, factory.match_index, factory.next_index
 
     tr.clear()
-    clock.pump([0.005] * 200 + [0.01])
+    clock.pump([0.005] * 200)
 
     import re
-    assert len(re.findall("AppendEntries", tr.value())) == 40
+    assert len(re.findall("AppendEntries", tr.value())) > 5
 
     assert factory.state == LEADER
     
