@@ -2,6 +2,7 @@ from twisted.internet import protocol, reactor
 
 import random
 import shelve
+import bsddb
 
 FOLLOWER = 1
 CANDIDATE = 2
@@ -133,7 +134,9 @@ class MeduseFactory(protocol.Factory):
         self.log = None
 
         # Attempt to open them from disk
-        self.log = shelve.open('%s_log.db' % self.name, 'c')
+        db = bsddb.btopen('%s_log.db' % self.name, 'c')
+        self.log = shelve.BsdDbShelf(db)
+        #self.log = shelve.open('%s_log.db' % self.name, 'c')
 
         try:
             self.current_term = int(file("%s_term.txt" % self.name).read())
@@ -296,7 +299,7 @@ def test_election_timeout():
 
     for _ in range(100):
         clock.advance(0.1)
-        instance.dataReceived(("RequestVote", 0,0,0,0))
+        instance.dataReceived(str(("RequestVote", 0,0,0,0)))
         
 
     assert factory.state == FOLLOWER
@@ -327,7 +330,7 @@ def test_election_handling(mock_reactor):
     # Ensure old terms are rejected
     for _ in range(100):
         clock.advance(0.1)
-        instance.dataReceived(("RequestVote", 50, 0, 0, 0))
+        instance.dataReceived(str(("RequestVote", 50, 0, 0, 0)))
         assert tr.value() == str(("ReplyVote", 100, False))
         tr.clear()
 
@@ -339,7 +342,7 @@ def test_election_handling(mock_reactor):
     assert len(mock_reactor.call_args_list) == 2
 
     assert factory.state == CANDIDATE
-    instance.dataReceived(("RequestVote", 150, 128, 0, 0))
+    instance.dataReceived(str(("RequestVote", 150, 128, 0, 0)))
 
     assert factory.state == FOLLOWER
     assert factory.voted_for == 128
