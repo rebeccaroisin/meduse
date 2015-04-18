@@ -47,7 +47,7 @@ def test_package():
 class MeduseLeaderProtocol(protocol.Protocol):
 
     def __init__(self, factory):
-        self.xxx = factory
+        self.leader_factory = factory
         self.factory = factory.factory
         self.buffer = ""
 
@@ -63,9 +63,9 @@ class MeduseLeaderProtocol(protocol.Protocol):
 
 
     def connectionMade(self):
-        self.xxx.retry = 0.2
-        self.xxx.proto = self
-        
+        self.leader_factory.retry = 0.2
+        self.leader_factory.proto = self
+
         if self.factory.state == CANDIDATE:
             (log_term, log_index, _) = self.factory.get_last_log()
             msg = ("RequestVote", self.factory.current_term, self.factory.name, log_index, log_term)
