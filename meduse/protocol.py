@@ -1,28 +1,79 @@
 from twisted.internet import protocol, reactor
+from twisted.internet.endpoints import TCP4ClientEndpoint, connectProtocol
 
 import random
 import shelve
 import bsddb
+import struct
+import json
 
 FOLLOWER = 1
 CANDIDATE = 2
 LEADER = 3
 
+def package_data(data):
+    message = json.dumps(data)
+    header = struct.pack("I", (len(message)))
+    return header + message
+
+def unpackage_data(data):
+    if len(data) < 4:
+        return None, data
+
+    length = struct.unpack("I", data[:4])[0]
+    if len(data) >= length + 4:
+        message = data[4:4+length]
+        data = data[4+length:]
+        message = json.loads(message)
+        return message, data
+    else:
+        return None, data
+
+def test_package():
+    d = [1,2,4,5, "Hello"]
+    p = package_data(d)
+    d0, _ = unpackage_data(p)
+    assert d == d0
+
+    d = [1,2,4,5, "Hello"] * 100
+    p = package_data(d)
+    p = p[:30]
+    d0, p0 = unpackage_data(p)
+    assert d0 == None
+    assert p0 == p
+
+
 ## An instance of the raft server
 class MeduseLeaderProtocol(protocol.Protocol):
 
     def __init__(self, factory):
-        self.factory = factory
+        self.xxx = factory
+        self.factory = factory.factory
         self.buffer = ""
 
-    def connectionMade(self):
-        assert self.factory.state == CANDIDATE
-        (log_term, log_index, _) = self.factory.get_last_log()
-        msg = ("RequestVote", self.factory.current_term, self.factory.name, log_index, log_term)
-        self.transport.write(str(msg))
 
     def dataReceived(self, data):
-        data = eval(data) # BAD BAD BAD
+        self.buffer += data
+        while True:
+            message, self.buffer = unpackage_data(self.buffer)
+            if message is not None:
+                self.process_message(message)
+            else:
+                break
+
+
+    def connectionMade(self):
+        self.xxx.retry = 0.2
+        self.xxx.proto = self
+        
+        if self.factory.state == CANDIDATE:
+            (log_term, log_index, _) = self.factory.get_last_log()
+            msg = ("RequestVote", self.factory.current_term, self.factory.name, log_index, log_term)
+            self.transport.write(package_data(msg))
+
+
+    def process_message(self, data):
+        # data = eval(data) # BAD BAD BAD
 
         if data[0] == "ReplyVote":
             _, other_term, vote = data
@@ -56,23 +107,58 @@ class MeduseLeaderProtocol(protocol.Protocol):
 ## Factories to connect to the other raft peers
 class LeaderClientFactory(protocol.ClientFactory):
 
-    def __init__(self, upper_factory):
+    def __init__(self, upper_factory, client_info):
         self.factory = upper_factory
+        self.client_info = client_info
+
         self.noisy = False
+        self.proto = None
+        self.retry = 0.2
+        self.reconnect_timer = None
+
+    def schedule_reconnect(self):
+        ## Do not reschedule
+        if self.reconnect_timer is not None and self.reconnect_timer.active():
+            return
+
+        assert self.proto == None
+        self.retry *= (1.5 + random.random()) 
+        self.retry = min(self.retry, 5)
+        self.reconnect_timer = self.factory.reactor.callLater(self.retry , self.reconnect)
+
+        
+    def reconnect(self):
+        assert self.proto == None
+        host, port, name = self.client_info
+        print "rconnect", self.client_info
+        reactor.connectTCP(host, port, self)
 
 
     def buildProtocol(self, addr):
         print 'Connected.'
-        c = MeduseLeaderProtocol(self.factory)
-        self.factory.conn += [c]
-        return c
+
+        assert self.proto is None
+        self.factory.conn += [ self ]
+        proto = MeduseLeaderProtocol(self)
+        return proto
 
 
     def clientConnectionLost(self, connector, reason):
-        print "Gone"
-        if self.factory.state == LEADER:
+        print "Connection Lost to %s" % self.client_info[2]
+        assert self.proto is not None
+        self.proto = None
+        if self.factory.state in [LEADER, CANDIDATE]:
             print 'Lost connection.  Reason:', reason, connector
+            self.schedule_reconnect()
 
+
+    def clientConnectionFailed(self, connector, reason):
+        print "Connection Failed %s" % self.client_info[2]
+
+        self.proto = None
+        if self.factory.state in [LEADER, CANDIDATE]:
+            print 'Lost connection.  Reason:', reason, connector
+            self.schedule_reconnect()
 
 ## An instance of the raft server
 class MeduseProtocol(protocol.Protocol):
@@ -81,11 +167,20 @@ class MeduseProtocol(protocol.Protocol):
         self.factory = factory
         self.buffer = ""
 
+
     def dataReceived(self, data):
+        self.buffer += data
+        while True:
+            message, self.buffer = unpackage_data(self.buffer)
+            if message is not None:
+                self.process_message(message)
+            else:
+                break
+
+
+    def process_message(self, data):
         ## When we receive data by a candidate or leader back off our own timer
         self.factory.reset_election_timeout()
-
-        data = eval(data)
 
         if data[0] == "RequestVote":
             # Parse incoming message
@@ -100,7 +195,7 @@ class MeduseProtocol(protocol.Protocol):
             # If old epoch, do not grant vote and send new epoch
             if term < self.factory.current_term:
                 outmsg = ("ReplyVote", self.factory.current_term, False)
-                self.transport.write(str(outmsg))
+                self.transport.write(package_data(outmsg))
                 return
 
             # If same epoch but we have already voted for someone
@@ -111,12 +206,12 @@ class MeduseProtocol(protocol.Protocol):
                 self.factory.set_persistant(term, candidateID)
 
                 outmsg = ("ReplyVote", term, True)
-                self.transport.write(str(outmsg))
+                self.transport.write(package_data(outmsg))
                 return
 
             # Otherwise refuse the vote
             outmsg = ("ReplyVote", self.factory.current_term, False)
-            self.transport.write(str(outmsg))
+            self.transport.write(package_data(outmsg))
             return
 
 
@@ -135,7 +230,7 @@ class MeduseFactory(protocol.Factory):
         self.conn = []
         self.votes = None
 
-        self.LeaderFactory = LeaderClientFactory(self)
+        # self.LeaderFactory = LeaderClientFactory(self)
 
         self.name = name
         self.reactor = reactor
@@ -168,7 +263,7 @@ class MeduseFactory(protocol.Factory):
         ## Timers
         self.heartbeat_timeout = None
         self.election_timeout = None
-        self.reset_election_timeout()
+        self.reset_election_timeout(delta=5)
 
 
     def get_last_log(self):
@@ -185,12 +280,12 @@ class MeduseFactory(protocol.Factory):
         self.log.sync()
 
 
-    def reset_election_timeout(self):
+    def reset_election_timeout(self, delta = 0):
         if self.state == FOLLOWER or self.state == CANDIDATE:
             if self.election_timeout is not None and self.election_timeout.active():
                 self.election_timeout.cancel()
 
-            self.election_timeout = self.reactor.callLater(random.randint(150, 300) / 1000.0 , self.start_leader_election)
+            self.election_timeout = self.reactor.callLater(delta + random.randint(150, 300) / 1000.0 , self.start_leader_election)
 
 
     def back_to_follower(self):
@@ -201,7 +296,8 @@ class MeduseFactory(protocol.Factory):
         ## Cancel all connections
         while len(self.conn) > 0:
             c = self.conn.pop()
-            c.transport.loseConnection()
+            if c.proto is not None:
+                c.proto.transport.loseConnection()
 
         ## Reset election timeout
         if self.heartbeat_timeout is not None and self.heartbeat_timeout.active():
@@ -229,7 +325,12 @@ class MeduseFactory(protocol.Factory):
 
         # self.conn = []
         for (host, port, name) in self.others:
-            reactor.connectTCP(host, port, self.LeaderFactory)
+
+            # Make a specific factory for this peer
+            client_info = (host, port, name)
+            c = LeaderClientFactory(self, client_info)
+
+            reactor.connectTCP(host, port, c)
 
 
     def reset_heartbeat(self):
@@ -249,8 +350,9 @@ class MeduseFactory(protocol.Factory):
         (log_term, log_index, _) = self.get_last_log()
         msg = ("AppendEntries", self.current_term, self.name, log_index, log_term, [], log_index)
 
-        for c in self.conn:            
-            c.transport.write(str(msg))
+        for c in self.conn:  
+            if c.proto is not None:
+                c.proto.transport.write(package_data(msg))
 
         self.reset_heartbeat()
 
@@ -320,7 +422,7 @@ def test_election_timeout():
 
     for _ in range(100):
         clock.advance(0.1)
-        instance.dataReceived(str(("RequestVote", 0,0,0,0)))
+        instance.dataReceived(package_data(("RequestVote", 0,0,0,0)))
         
 
     assert factory.state == FOLLOWER
@@ -344,6 +446,7 @@ def test_election_handling(mock_reactor):
     
     factory = MeduseFactory("node0", reactor=clock)
     factory.current_term = 100
+    factory.others = [("127.0.0.1", 8080, "None1")]
     instance = factory.buildProtocol(None)
     tr = proto_helpers.StringTransport()
     instance.makeConnection(tr)
@@ -351,8 +454,8 @@ def test_election_handling(mock_reactor):
     # Ensure old terms are rejected
     for _ in range(100):
         clock.advance(0.1)
-        instance.dataReceived(str(("RequestVote", 50, 0, 0, 0)))
-        assert tr.value() == str(("ReplyVote", 100, False))
+        instance.dataReceived(package_data(("RequestVote", 50, 0, 0, 0)))
+        assert tr.value() == package_data(("ReplyVote", 100, False))
         tr.clear()
 
     # Define some others
@@ -363,11 +466,11 @@ def test_election_handling(mock_reactor):
     assert len(mock_reactor.call_args_list) == 2
 
     assert factory.state == CANDIDATE
-    instance.dataReceived(str(("RequestVote", 150, 128, 0, 0)))
+    instance.dataReceived(package_data(("RequestVote", 150, 128, 0, 0)))
 
     assert factory.state == FOLLOWER
     assert factory.voted_for == 128
-    assert tr.value() == str(("ReplyVote", 150, True))
+    assert tr.value() == package_data(("ReplyVote", 150, True))
 
     if os.path.exists("node0_voted.txt"):
         os.remove("node0_voted.txt")
@@ -383,7 +486,7 @@ def test_leader_client():
 
     ## Put in candidate state
     factory.start_leader_election()
-    client_factory = LeaderClientFactory(factory)
+    client_factory = LeaderClientFactory(factory, ("127.0.0.1", 8080, "foo1"))
 
     instance = client_factory.buildProtocol(None)
     tr = proto_helpers.StringTransport()
@@ -391,7 +494,7 @@ def test_leader_client():
 
     assert factory.state == CANDIDATE
 
-    instance.dataReceived(str(("ReplyVote", 0, True)))
+    instance.dataReceived(package_data(("ReplyVote", 0, True)))
     print "Votes", factory.votes
     assert factory.state == LEADER
 
@@ -408,7 +511,7 @@ def test_leader_backoff():
 
     ## Puts the protocol in CANDIDATE STATE
     factory.start_leader_election()
-    client_factory = factory.LeaderFactory
+    client_factory = LeaderClientFactory(factory, ("127.0.0.1", 8080, "foo1"))
 
     instance = client_factory.buildProtocol(None)
     tr = proto_helpers.StringTransport()
@@ -417,7 +520,7 @@ def test_leader_backoff():
     assert factory.state == CANDIDATE
 
     # print tr.value()
-    instance.dataReceived(str(("ReplyVote", 10, False)))
+    instance.dataReceived(package_data(("ReplyVote", 10, False)))
     print "Votes", factory.votes
     assert factory.state == FOLLOWER
 
@@ -434,7 +537,7 @@ def test_leader_heartbeat():
 
     ## Put in candidate state
     factory.start_leader_election()
-    client_factory = LeaderClientFactory(factory)
+    client_factory = LeaderClientFactory(factory, ("127.0.0.1", 8080, "foo1"))
 
     instance = client_factory.buildProtocol(None)
     tr = proto_helpers.StringTransport()
@@ -442,7 +545,7 @@ def test_leader_heartbeat():
 
     assert factory.state == CANDIDATE
 
-    instance.dataReceived(str(("ReplyVote", 0, True)))
+    instance.dataReceived(package_data(("ReplyVote", 0, True)))
     print "Votes", factory.votes
     assert factory.state == LEADER
 
