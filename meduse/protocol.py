@@ -7,9 +7,11 @@ import bsddb
 import struct
 import json
 
+
 FOLLOWER = 1
 CANDIDATE = 2
 LEADER = 3
+
 
 def package_data(data):
     message = json.dumps(data)
@@ -28,19 +30,6 @@ def unpackage_data(data):
         return message, data
     else:
         return None, data
-
-def test_package():
-    d = [1,2,4,5, "Hello"]
-    p = package_data(d)
-    d0, _ = unpackage_data(p)
-    assert d == d0
-
-    d = [1,2,4,5, "Hello"] * 100
-    p = package_data(d)
-    p = p[:30]
-    d0, p0 = unpackage_data(p)
-    assert d0 == None
-    assert p0 == p
 
 
 ## An instance of the raft server
@@ -130,12 +119,12 @@ class LeaderClientFactory(protocol.ClientFactory):
     def reconnect(self):
         assert self.proto == None
         host, port, name = self.client_info
-        print "rconnect", self.client_info
+        
         reactor.connectTCP(host, port, self)
 
 
     def buildProtocol(self, addr):
-        print 'Connected.'
+        print 'Connected to %s' % self.client_info[2]
 
         assert self.proto is None
         self.factory.conn += [ self ]
@@ -145,19 +134,19 @@ class LeaderClientFactory(protocol.ClientFactory):
 
     def clientConnectionLost(self, connector, reason):
         print "Connection Lost to %s" % self.client_info[2]
+
         assert self.proto is not None
         self.proto = None
         if self.factory.state in [LEADER, CANDIDATE]:
-            print 'Lost connection.  Reason:', reason, connector
             self.schedule_reconnect()
 
 
     def clientConnectionFailed(self, connector, reason):
         print "Connection Failed %s" % self.client_info[2]
 
+        assert self.proto is not None
         self.proto = None
         if self.factory.state in [LEADER, CANDIDATE]:
-            print 'Lost connection.  Reason:', reason, connector
             self.schedule_reconnect()
 
 ## An instance of the raft server
@@ -216,7 +205,97 @@ class MeduseProtocol(protocol.Protocol):
 
 
         elif data[0] == "AppendEntries":
-            pass
+            _, term, leader_name, log_index, log_term, entries, leader_commit = data
+
+            print "logindex", log_index
+            if str(log_index) in self.factory.log:
+                (our_log_term, our_log_data) = self.factory.log[str(log_index)]
+
+            LogOK = (log_index == 0)
+            LogOK |= (log_index > 0) and \
+                        (log_index <= len(self.factory.log)) and \
+                        (log_term == our_log_term)
+            
+            if not LogOK:
+                print "LOGOK", LogOK
+                print "Part1", log_index, (0 < log_index <= len(self.factory.log))
+                print (log_term == our_log_term)
+
+
+            # Go back to follower
+            if term > self.factory.current_term:
+                self.factory.back_to_follower()
+                self.factory.set_persistant(term, None)
+            
+
+            # If term of leader is smaller return our current term
+            reject_1 = term < self.factory.current_term
+            reject_2 = (term == self.factory.current_term) and \
+                       (self.factory.state == FOLLOWER) and \
+                       (not LogOK)
+
+            # Reasons to reject
+            if reject_1 or reject_2:
+                outmsg = ("ReplyAppendEntries", self.factory.current_term, False)
+                self.transport.write(package_data(outmsg))
+                return
+
+
+            # Say nothing? (Strange)
+            if term == self.factory.current_term and \
+               self.factory.state == CANDIDATE:
+                self.factory.back_to_follower()
+                # return
+
+            # Delete entries
+            rindex = log_index + 1
+            if len(entries) > 0 and len(self.factory.log) >= rindex:
+                if str(rindex) in self.factory.log:
+                    (r_term, r_data) = self.factory.log[str(rindex)]
+                    if r_term != entries[0][0]:
+                        print "Remove shit"
+                        while str(rindex) in self.factory.log:
+                            del self.factory.log[str(rindex)]
+                            rindex += 1
+                        print self.factory.log
+
+
+            # Append all entries
+            if len(entries) > 0 and len(self.factory.log) == log_index:
+                print "Add shit"
+                v = log_index + 1
+                for e in entries:
+                    self.factory.log[str(v)] = (e[0], e[1])
+                    v += 1
+                print self.factory.log
+
+
+            # Accept request 
+            if (term == self.factory.current_term) and \
+                    (self.factory.state == FOLLOWER) and \
+                    LogOK:
+                
+                rindex = log_index + 1
+                if len(entries) == 0:
+                    self.factory.commit_index = leader_commit
+                    outmsg = ("ReplyAppendEntries", self.factory.current_term, True, self.factory.commit_index)
+                    self.transport.write(package_data(outmsg))
+                    # return
+
+                print "idx",  len(self.factory.log), rindex
+                if len(entries) > 0 and len(self.factory.log) >= rindex:
+                    (r_term, _) = self.factory.log[str(rindex)]
+
+                    (entry_term, _) = entries[0]
+
+                    print "The term", entry_term, r_term
+                    if (entry_term == r_term):
+                        self.factory.commit_index = leader_commit
+                        outmsg = ("ReplyAppendEntries", self.factory.current_term, True, self.factory.commit_index + len(entries))
+                        self.transport.write(package_data(outmsg))
+                        ## TODO append entries
+                        # return
+
 
         else:
             assert False
@@ -225,6 +304,17 @@ class MeduseProtocol(protocol.Protocol):
 
 class MeduseFactory(protocol.Factory):
     
+    def debug_cleanup(self):
+        if os.path.exists("%s_log.db.txt" % self.name):
+            os.remove("%s_log.db.txt" % self.name)
+    
+        if os.path.exists("%s_term.txt" % self.name):
+            os.remove("%s_term.txt" % self.name)
+
+        if os.path.exists("%s_voted.txt" % self.name):
+            os.remove("%s_voted.txt" % self.name)
+    
+
     def __init__(self, name, reactor=reactor):
         self.others = []
         self.conn = []
@@ -243,7 +333,9 @@ class MeduseFactory(protocol.Factory):
         # Attempt to open them from disk
         db = bsddb.btopen('%s_log.db' % self.name, 'c')
         self.log = shelve.BsdDbShelf(db)
-        #self.log = shelve.open('%s_log.db' % self.name, 'c')
+        if len(self.log) == 0:
+            self.log[str(1)] = (0, "START")
+            self.log.sync()
 
         try:
             self.current_term = int(file("%s_term.txt" % self.name).read())
@@ -253,7 +345,7 @@ class MeduseFactory(protocol.Factory):
 
         ## Ephemeral state
         self.state = FOLLOWER
-        self.commit_index = len(self.log) - 1
+        self.commit_index = 1
         self.last_applied = None
 
         ## Leader State
@@ -270,7 +362,7 @@ class MeduseFactory(protocol.Factory):
         if self.commit_index == -1:
             return (-1, -1, None)
         else:
-            term, data = self.log[str(self.commit_index)]
+            term, data = self.log[str(len(self.log))]
             return (term, self.commit_index, data)
 
 
@@ -437,6 +529,7 @@ def test_election_timeout():
     assert current_term == 1
     os.remove("node0_term.txt")
 
+    factory.debug_cleanup()
 
 import mock
 
@@ -466,18 +559,13 @@ def test_election_handling(mock_reactor):
     assert len(mock_reactor.call_args_list) == 2
 
     assert factory.state == CANDIDATE
-    instance.dataReceived(package_data(("RequestVote", 150, 128, 0, 0)))
+    instance.dataReceived(package_data(("RequestVote", 150, 128, 1, 0)))
 
     assert factory.state == FOLLOWER
     assert factory.voted_for == 128
     assert tr.value() == package_data(("ReplyVote", 150, True))
 
-    if os.path.exists("node0_voted.txt"):
-        os.remove("node0_voted.txt")
-    
-    if os.path.exists("node0_term.txt"):
-        os.remove("node0_term.txt")
-
+    factory.debug_cleanup()
 
 def test_leader_client():
     clock = Clock()
@@ -498,11 +586,8 @@ def test_leader_client():
     print "Votes", factory.votes
     assert factory.state == LEADER
 
-    if os.path.exists("node0_voted.txt"):
-        os.remove("node0_voted.txt")
-    
-    if os.path.exists("node0_term.txt"):
-        os.remove("node0_term.txt")
+    factory.debug_cleanup()
+
 
 def test_leader_backoff():
     clock = Clock()
@@ -524,11 +609,8 @@ def test_leader_backoff():
     print "Votes", factory.votes
     assert factory.state == FOLLOWER
 
-    if os.path.exists("node0_voted.txt"):
-        os.remove("node0_voted.txt")
-    
-    if os.path.exists("node0_term.txt"):
-        os.remove("node0_term.txt")
+    factory.debug_cleanup() 
+
 
 def test_leader_heartbeat():
     clock = Clock()
@@ -562,8 +644,65 @@ def test_leader_heartbeat():
     assert factory.state == LEADER
     
 
-    if os.path.exists("node0_voted.txt"):
-        os.remove("node0_voted.txt")
+    factory.debug_cleanup()
+
+
+def test_package():
+    d = [1,2,4,5, "Hello"]
+    p = package_data(d)
+    d0, _ = unpackage_data(p)
+    assert d == d0
+
+    d = [1,2,4,5, "Hello"] * 100
+    p = package_data(d)
+    p = p[:30]
+    d0, p0 = unpackage_data(p)
+    assert d0 == None
+    assert p0 == p
+
+
+# @mock.patch('twisted.internet.reactor.connectTCP')
+def test_append_handling():
+    clock = Clock()
     
-    if os.path.exists("node0_term.txt"):
-        os.remove("node0_term.txt")
+    factory = MeduseFactory("node0", reactor=clock)
+    factory.current_term = 100
+    factory.others = [("127.0.0.1", 8080, "None1")]
+
+    instance = factory.buildProtocol(None)
+    tr = proto_helpers.StringTransport()
+    instance.makeConnection(tr)
+
+    msg = ("AppendEntries", 100, "AttillaTheHun", 0, 0, [], 0)
+    instance.dataReceived(package_data(msg))
+    assert unpackage_data(tr.value())[0][2] == True
+
+    tr.clear()
+    assert factory.current_term == 100
+    msg = ("AppendEntries", 101, "AttillaTheHun", 0, 0, [], 0)
+    instance.dataReceived(package_data(msg))
+    assert unpackage_data(tr.value())[0][2] == True
+    assert factory.current_term == 101
+
+    tr.clear()
+    msg = ("AppendEntries", 90, "AttillaTheHun", 0, 0, [], 0)
+    instance.dataReceived(package_data(msg))
+    assert unpackage_data(tr.value())[0][2] == False
+
+    ## Test appending on good log
+    tr.clear()
+    assert len(factory.log) == 1
+    msg = ("AppendEntries", 101, "AttillaTheHun", 1, 0, [(101, "Pony")], 0)
+    instance.dataReceived(package_data(msg))
+    assert unpackage_data(tr.value())[0][2] == True
+
+    ## Test appending after deleting bad log
+    tr.clear()
+    assert len(factory.log) == 2
+    msg = ("AppendEntries", 102, "AttillaTheHun", 1, 0, [(102, "Pony")], 0)
+    instance.dataReceived(package_data(msg))
+    assert unpackage_data(tr.value())[0][2] == True
+
+    print unpackage_data(tr.value())
+    
+    factory.debug_cleanup()    
