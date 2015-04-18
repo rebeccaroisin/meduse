@@ -175,7 +175,7 @@ class MeduseFactory(protocol.Factory):
 
     def reset_election_timeout(self):
         if self.state == FOLLOWER or self.state == CANDIDATE:
-            if self.election_timeout is not None:
+            if self.election_timeout is not None and self.election_timeout.active():
                 self.election_timeout.cancel()
 
             self.election_timeout = self.reactor.callLater(random.randint(150, 300) / 1000.0 , self.start_leader_election)
@@ -200,6 +200,9 @@ class MeduseFactory(protocol.Factory):
         
         ## In case the election takes too long, we move forward
         #  that happens in case of split votes.
+        if self.election_timeout is not None and self.election_timeout.active():
+            self.election_timeout.cancel()
+
         self.election_timeout = None
         self.reset_election_timeout()
 
@@ -224,8 +227,6 @@ class MeduseFactory(protocol.Factory):
 
 
     def send_heartbeat(self):
-        #print "Eeep!"
-        #print "state (send hb) = ", self.state
         self.heartbeat_timeout = None
 
         (log_term, log_index, _) = self.get_last_log()
@@ -235,7 +236,6 @@ class MeduseFactory(protocol.Factory):
             c.transport.write(str(msg))
 
         self.reset_heartbeat()
-        #print "state (hb) = ", self.state
 
     def start_leader(self):
         print "I am legend."
@@ -252,7 +252,6 @@ class MeduseFactory(protocol.Factory):
         (log_term, log_index, _) = self.get_last_log()
         self.next_index = [log_index] * len(self.others)
         self.match_index = [-1] * len(self.others)
-        #print "state = ", self.state
 
     def set_persistant(self, term, vote):
         self.current_term = term
