@@ -228,6 +228,7 @@ class MeduseFactory(protocol.Factory):
 
 
     def send_heartbeat(self):
+        #print "hb"
         self.heartbeat_timeout = None
 
         (log_term, log_index, _) = self.get_last_log()
@@ -435,7 +436,7 @@ def test_leader_heartbeat():
     print factory.election_timeout, factory.match_index, factory.next_index
 
     tr.clear()
-    clock.advance(1)
+    clock.pump([0.01] * 100)
     print tr.value()
     assert factory.state == LEADER
 
