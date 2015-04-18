@@ -359,6 +359,8 @@ def test_leader_client():
     clock = Clock()
     
     factory = MeduseFactory("node0", reactor=clock)
+
+    ## Put in candidate state
     factory.start_leader_election()
     client_factory = LeaderClientFactory(factory)
 
@@ -366,7 +368,8 @@ def test_leader_client():
     tr = proto_helpers.StringTransport()
     instance.makeConnection(tr)
 
-    print tr.value()
+    assert factory.state == CANDIDATE
+
     instance.dataReceived(str(("ReplyVote", 0, True)))
     print "Votes", factory.votes
     assert factory.state == LEADER
@@ -381,14 +384,18 @@ def test_leader_backoff():
     clock = Clock()
     
     factory = MeduseFactory("node0", reactor=clock)
+
+    ## Puts the protocol in CANDIDATE STATE
     factory.start_leader_election()
-    client_factory = LeaderClientFactory(factory)
+    client_factory = factory.LeaderFactory
 
     instance = client_factory.buildProtocol(None)
     tr = proto_helpers.StringTransport()
     instance.makeConnection(tr)
 
-    print tr.value()
+    assert factory.state == CANDIDATE
+
+    # print tr.value()
     instance.dataReceived(str(("ReplyVote", 10, False)))
     print "Votes", factory.votes
     assert factory.state == FOLLOWER
