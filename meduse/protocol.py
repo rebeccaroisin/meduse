@@ -459,7 +459,6 @@ def test_leader_heartbeat():
     assert factory.state == LEADER
     
 
-
     if os.path.exists("node0_voted.txt"):
         os.remove("node0_voted.txt")
     
