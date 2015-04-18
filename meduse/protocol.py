@@ -214,14 +214,18 @@ class MeduseFactory(protocol.Factory):
 
 
     def reset_heartbeat(self):
+        #print "state (hb) = ", self.state
         if self.state == LEADER:
             if self.heartbeat_timeout is not None:
                 self.heartbeat_timeout.cancel()
 
             self.heartbeat_timeout = self.reactor.callLater(25 / 1000.0 , self.send_heartbeat)
+            #print "state (hb) = ", self.state
 
 
     def send_heartbeat(self):
+        #print "Eeep!"
+        #print "state (send hb) = ", self.state
         self.heartbeat_timeout = None
 
         (log_term, log_index, _) = self.get_last_log()
@@ -231,6 +235,7 @@ class MeduseFactory(protocol.Factory):
             c.transport.write(str(msg))
 
         self.reset_heartbeat()
+        #print "state (hb) = ", self.state
 
     def start_leader(self):
         print "I am legend."
@@ -247,7 +252,7 @@ class MeduseFactory(protocol.Factory):
         (log_term, log_index, _) = self.get_last_log()
         self.next_index = [log_index] * len(self.others)
         self.match_index = [-1] * len(self.others)
-
+        #print "state = ", self.state
 
     def set_persistant(self, term, vote):
         self.current_term = term
@@ -399,6 +404,40 @@ def test_leader_backoff():
     instance.dataReceived(str(("ReplyVote", 10, False)))
     print "Votes", factory.votes
     assert factory.state == FOLLOWER
+
+    if os.path.exists("node0_voted.txt"):
+        os.remove("node0_voted.txt")
+    
+    if os.path.exists("node0_term.txt"):
+        os.remove("node0_term.txt")
+
+def test_leader_heartbeat():
+    clock = Clock()
+    
+    factory = MeduseFactory("node0", reactor=clock)
+
+    ## Put in candidate state
+    factory.start_leader_election()
+    client_factory = LeaderClientFactory(factory)
+
+    instance = client_factory.buildProtocol(None)
+    tr = proto_helpers.StringTransport()
+    instance.makeConnection(tr)
+
+    assert factory.state == CANDIDATE
+
+    instance.dataReceived(str(("ReplyVote", 0, True)))
+    print "Votes", factory.votes
+    assert factory.state == LEADER
+
+    print factory.conn
+    assert len(factory.conn) == 1
+    print factory.election_timeout, factory.match_index, factory.next_index
+
+    tr.clear()
+    clock.advance(1)
+    print tr.value()
+    assert factory.state == LEADER
 
     if os.path.exists("node0_voted.txt"):
         os.remove("node0_voted.txt")
