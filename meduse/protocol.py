@@ -221,7 +221,6 @@ class MeduseFactory(protocol.Factory):
             if self.heartbeat_timeout is not None and self.heartbeat_timeout.active():
                 self.heartbeat_timeout.cancel()
 
-            print "Reset heartbeat"
             self.heartbeat_timeout = self.reactor.callLater(25 / 1000.0 , self.send_heartbeat)
         else:
             raise Exception("I am not the leader")
@@ -436,9 +435,14 @@ def test_leader_heartbeat():
     print factory.election_timeout, factory.match_index, factory.next_index
 
     tr.clear()
-    clock.pump([0.01] * 100)
-    print tr.value()
+    clock.pump([0.005] * 200 + [0.01])
+
+    import re
+    assert len(re.findall("AppendEntries", tr.value())) == 40
+
     assert factory.state == LEADER
+    
+
 
     if os.path.exists("node0_voted.txt"):
         os.remove("node0_voted.txt")
