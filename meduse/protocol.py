@@ -182,26 +182,24 @@ class MeduseProtocol(protocol.Protocol):
                 self.factory.back_to_follower()
                 self.factory.set_persistant(term, None)
 
+            # print "logindex", log_index
+            if str(lastLogIndex) in self.factory.log:
+                (our_log_term, our_log_data) = self.factory.log[str(lastLogIndex)]
 
-            # If old epoch, do not grant vote and send new epoch
-            if term < self.factory.current_term:
-                outmsg = ("ReplyVote", self.factory.current_term, False)
-                self.transport.write(package_data(outmsg))
-                return
+            LogOK = (lastLogIndex == 0)
+            LogOK |= (lastLogIndex > 0) and \
+                        (lastLogIndex <= len(self.factory.log)) and \
+                        (lastLogTerm == our_log_term)
 
-            # If same epoch but we have already voted for someone
-            (log_term, log_index, _) = self.factory.get_last_log()
-            if self.factory.voted_for is None and \
-                log_term <= lastLogTerm and log_index <= lastLogIndex:
+            grant = LogOK
+            grant &= (term == self.factory.current_term)
+            grant &= self.factory.voted_for in [None, candidateID]
 
-                self.factory.set_persistant(term, candidateID)
+            if grant:
+                self.factory.set_persistant(self.factory.current_term, candidateID)
 
-                outmsg = ("ReplyVote", term, True)
-                self.transport.write(package_data(outmsg))
-                return
-
-            # Otherwise refuse the vote
-            outmsg = ("ReplyVote", self.factory.current_term, False)
+            # Reply
+            outmsg = ("ReplyVote", self.factory.current_term, grant)
             self.transport.write(package_data(outmsg))
             return
 
@@ -703,9 +701,10 @@ def test_append_handling():
     ## Test appending after deleting bad log
     tr.clear()
     assert len(factory.log) == 2
-    msg = ("AppendEntries", 102, "AttillaTheHun", 1, 0, [(102, "Pony")], 0)
+    msg = ("AppendEntries", 102, "AttillaTheHun", 1, 0, [(102, "Donkey")], 0)
     instance.dataReceived(package_data(msg))
     assert unpackage_data(tr.value())[0][2] == True
+    assert factory.log["2"] == (102, "Donkey")
 
     ## Test appending after all that
     tr.clear()
@@ -714,9 +713,7 @@ def test_append_handling():
     instance.dataReceived(package_data(msg))
     assert unpackage_data(tr.value())[0][2] == True
     assert len(factory.log) == 3
-
-    print unpackage_data(tr.value())
-
+    assert factory.log["3"] == (102, "Rabbit")
 
     print unpackage_data(tr.value())
     
