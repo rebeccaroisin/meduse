@@ -68,7 +68,7 @@ class MeduseLeaderProtocol(protocol.Protocol):
             _, other_term, vote = data
 
             # If we are behind in terms become follower again
-            print other_term, self.factory.current_term
+            # print other_term, self.factory.current_term
             if other_term > self.factory.current_term:
                 self.factory.back_to_follower()
                 self.factory.set_persistant(other_term, None)
@@ -81,9 +81,9 @@ class MeduseLeaderProtocol(protocol.Protocol):
                     self.factory.start_leader()
 
         elif data[0] == "ReplyAppendEntries":
-            _, other_term, success = data
+            _, other_term, success, other_commit = data
 
-            print other_term, self.factory.current_term
+            # print other_term, self.factory.current_term
             if other_term > self.factory.current_term:
                 self.factory.back_to_follower()
                 self.factory.set_persistant(other_term, None)
@@ -104,6 +104,9 @@ class LeaderClientFactory(protocol.ClientFactory):
         self.proto = None
         self.retry = 0.2
         self.reconnect_timer = None
+
+        self.factory.conn += [ self ]
+
 
     def schedule_reconnect(self):
         ## Do not reschedule
@@ -127,7 +130,6 @@ class LeaderClientFactory(protocol.ClientFactory):
         print 'Connected to %s' % self.client_info[2]
 
         assert self.proto is None
-        self.factory.conn += [ self ]
         proto = MeduseLeaderProtocol(self)
         return proto
 
@@ -144,7 +146,7 @@ class LeaderClientFactory(protocol.ClientFactory):
     def clientConnectionFailed(self, connector, reason):
         print "Connection Failed %s" % self.client_info[2]
 
-        assert self.proto is not None
+        assert self.proto is None
         self.proto = None
         if self.factory.state in [LEADER, CANDIDATE]:
             self.schedule_reconnect()
@@ -207,7 +209,7 @@ class MeduseProtocol(protocol.Protocol):
         elif data[0] == "AppendEntries":
             _, term, leader_name, log_index, log_term, entries, leader_commit = data
 
-            print "logindex", log_index
+            # print "logindex", log_index
             if str(log_index) in self.factory.log:
                 (our_log_term, our_log_data) = self.factory.log[str(log_index)]
 
@@ -216,10 +218,10 @@ class MeduseProtocol(protocol.Protocol):
                         (log_index <= len(self.factory.log)) and \
                         (log_term == our_log_term)
             
-            if not LogOK:
-                print "LOGOK", LogOK
-                print "Part1", log_index, (0 < log_index <= len(self.factory.log))
-                print (log_term == our_log_term)
+            #if not LogOK:
+            #    print "LOGOK", LogOK
+            #    print "Part1", log_index, (0 < log_index <= len(self.factory.log))
+            #    print (log_term == our_log_term)
 
 
             # Go back to follower
@@ -253,21 +255,21 @@ class MeduseProtocol(protocol.Protocol):
                 if str(rindex) in self.factory.log:
                     (r_term, r_data) = self.factory.log[str(rindex)]
                     if r_term != entries[0][0]:
-                        print "Remove shit"
+                        # print "Remove stuff"
                         while str(rindex) in self.factory.log:
                             del self.factory.log[str(rindex)]
                             rindex += 1
-                        print self.factory.log
+                        # print self.factory.log
 
 
             # Append all entries
             if len(entries) > 0 and len(self.factory.log) == log_index:
-                print "Add shit"
+                # print "Add stuff"
                 v = log_index + 1
                 for e in entries:
                     self.factory.log[str(v)] = (e[0], e[1])
                     v += 1
-                print self.factory.log
+                # print self.factory.log
 
 
             # Accept request 
@@ -282,13 +284,13 @@ class MeduseProtocol(protocol.Protocol):
                     self.transport.write(package_data(outmsg))
                     # return
 
-                print "idx",  len(self.factory.log), rindex
+                # print "idx",  len(self.factory.log), rindex
                 if len(entries) > 0 and len(self.factory.log) >= rindex:
                     (r_term, _) = self.factory.log[str(rindex)]
 
                     (entry_term, _) = entries[0]
 
-                    print "The term", entry_term, r_term
+                    # print "The term", entry_term, r_term
                     if (entry_term == r_term):
                         self.factory.commit_index = leader_commit
                         outmsg = ("ReplyAppendEntries", self.factory.current_term, True, self.factory.commit_index + len(entries))
@@ -673,19 +675,21 @@ def test_append_handling():
     tr = proto_helpers.StringTransport()
     instance.makeConnection(tr)
 
-    msg = ("AppendEntries", 100, "AttillaTheHun", 0, 0, [], 0)
+    msg = ("AppendEntries", 100, "AttillaTheHun", 1, 0, [], 0)
     instance.dataReceived(package_data(msg))
     assert unpackage_data(tr.value())[0][2] == True
 
+    ## Attempt to heatbeat from new term
     tr.clear()
     assert factory.current_term == 100
-    msg = ("AppendEntries", 101, "AttillaTheHun", 0, 0, [], 0)
+    msg = ("AppendEntries", 101, "AttillaTheHun", 1, 0, [], 0)
     instance.dataReceived(package_data(msg))
     assert unpackage_data(tr.value())[0][2] == True
     assert factory.current_term == 101
 
+    # Attempt to append from old term
     tr.clear()
-    msg = ("AppendEntries", 90, "AttillaTheHun", 0, 0, [], 0)
+    msg = ("AppendEntries", 90, "AttillaTheHun", 1, 0, [], 0)
     instance.dataReceived(package_data(msg))
     assert unpackage_data(tr.value())[0][2] == False
 
@@ -702,6 +706,17 @@ def test_append_handling():
     msg = ("AppendEntries", 102, "AttillaTheHun", 1, 0, [(102, "Pony")], 0)
     instance.dataReceived(package_data(msg))
     assert unpackage_data(tr.value())[0][2] == True
+
+    ## Test appending after all that
+    tr.clear()
+    assert len(factory.log) == 2
+    msg = ("AppendEntries", 102, "AttillaTheHun", 2, 102, [(102, "Rabbit")], 0)
+    instance.dataReceived(package_data(msg))
+    assert unpackage_data(tr.value())[0][2] == True
+    assert len(factory.log) == 3
+
+    print unpackage_data(tr.value())
+
 
     print unpackage_data(tr.value())
     
