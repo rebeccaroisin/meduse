@@ -707,16 +707,6 @@ def test_leader_heartbeat():
     clock.advance(30 / 1000.0)
     (msg_type, current_term, name, log_index, log_term, entries, msg_commit_index) = unpackage_data(tr.value())[0]
     assert len(entries) == 3
-    
-
-
-    #clock.pump([0.005] * 200)
-
-    #msg = ("AppendEntries", 101, "AttillaTheHun", 1, 0, [(101, "Pony")], 0)
-    #instance.dataReceived(package_data(msg))
-    #assert unpackage_data(tr.value())[0][2] == True
-
-    
 
     factory.debug_cleanup()
 
