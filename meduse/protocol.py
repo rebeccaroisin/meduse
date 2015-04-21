@@ -452,10 +452,11 @@ class MeduseFactory(protocol.Factory):
                 last_entry = min(len(self.log), self.next_index[name])
                 commit_index = min(self.commit_index, last_entry)
                 pos = self.next_index[name]
+
                 # put all of the log entries into the message
                 entries = []
-                for e in range(pos, len(self.log.keys()) - 1):
-                    entry = self.log[str(pos)]
+                for e in range(pos+1, len(self.log.keys())+1):
+                    entry = self.log[str(e)]
                     entries.append(entry)
                 #    self.factory.log[str(v)] = (e[0], e[1])
                 #    v += 1
@@ -676,6 +677,45 @@ def test_leader_heartbeat():
     assert len(re.findall("AppendEntries", tr.value())) > 5
 
     assert factory.state == LEADER
+
+    ## Now we need to test that the leader sends the correct messages
+
+    ## Test message sent after log updated
+    tr.clear()
+    assert len(factory.log) == 1
+    assert factory.current_term == 1
+
+    # add some dummy entries to the log
+    factory.log["2"] = (1, "NEXT")
+    factory.log["3"] = (1, "PROCHAIN")
+    assert len(factory.log) == 3
+
+    # check the message that is sent out
+    clock.advance(30 / 1000.0)
+    (msg_type, current_term, name, log_index, log_term, entries, msg_commit_index) = unpackage_data(tr.value())[0]
+    assert msg_type == "AppendEntries"
+    assert current_term == 1
+    assert len(entries) == 2
+    assert log_index == 0
+    assert log_term == 0
+    assert msg_commit_index == 1    
+    tr.clear()
+
+    # add another entry to the log
+    factory.log["4"] = (1, "LAST")
+    assert len(factory.log) == 4
+    clock.advance(30 / 1000.0)
+    (msg_type, current_term, name, log_index, log_term, entries, msg_commit_index) = unpackage_data(tr.value())[0]
+    assert len(entries) == 3
+    
+
+
+    #clock.pump([0.005] * 200)
+
+    #msg = ("AppendEntries", 101, "AttillaTheHun", 1, 0, [(101, "Pony")], 0)
+    #instance.dataReceived(package_data(msg))
+    #assert unpackage_data(tr.value())[0][2] == True
+
     
 
     factory.debug_cleanup()
