@@ -81,7 +81,7 @@ class MeduseLeaderProtocol(protocol.Protocol):
                     self.factory.start_leader()
 
         elif data[0] == "ReplyAppendEntries":
-            _, other_term, success, other_commit = data
+            _, other_term, success, match_index = data
 
             # print other_term, self.factory.current_term
             if other_term > self.factory.current_term:
@@ -90,6 +90,23 @@ class MeduseLeaderProtocol(protocol.Protocol):
                 return
 
             ## TODO
+            #("ReplyAppendEntries", self.factory.current_term, True, self.factory.commit_index)
+            if success == True:
+                # update match index from message
+                #nextIndex'  = [nextIndex  EXCEPT ![i][j] = m.mmatchIndex + 1]
+                #/\ matchIndex' = [matchIndex EXCEPT ![i][j] = m.mmatchIndex]
+                (_, _, name) = self.leader_factory.client_info
+                self.factory.next_index[name] = match_index + 1
+                self.factory.match_index = match_index
+                return
+
+            elif success == False:
+                # decrement match index
+                #nextIndex' = [nextIndex EXCEPT ![i][j] =
+                #               Max({nextIndex[i][j] - 1, 1})]
+                new_match = min(match_index-1, 1)
+                self.factory.match_index = new_match
+
 
 
 
@@ -236,7 +253,7 @@ class MeduseProtocol(protocol.Protocol):
 
             # Reasons to reject
             if reject_1 or reject_2:
-                outmsg = ("ReplyAppendEntries", self.factory.current_term, False)
+                outmsg = ("ReplyAppendEntries", self.factory.current_term, False, None)
                 self.transport.write(package_data(outmsg))
                 return
 
