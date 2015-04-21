@@ -440,10 +440,38 @@ class MeduseFactory(protocol.Factory):
         self.heartbeat_timeout = None
 
         (log_term, log_index, _) = self.get_last_log()
-        msg = ("AppendEntries", self.current_term, self.name, log_index, log_term, [], log_index)
+        #msg = ("AppendEntries", self.current_term, self.name, log_index, log_term, [], log_index)
 
-        for c in self.conn:  
+        for c in self.conn:
             if c.proto is not None:
+                (_, _, name) = c.client_info
+                print "Here is the stuff!", c.client_info
+                print "here is the dict", self.next_index.keys()
+                log_index = self.next_index[name] - 1
+
+                # lastEntry == Min({Len(log[i]), nextIndex[i][j]})
+                # mcommitIndex   |-> Min({commitIndex[i], lastEntry}
+                last_entry = min(len(self.log), self.next_index[name])
+                commit_index = min(self.commit_index, last_entry)
+                pos = self.next_index[name]
+                print "pos = ", pos, self.log
+                # put all of the log entries into the message
+                entries = []
+                for e in range(pos, len(self.log.keys()) - 1):
+                    entry = self.log[str(pos)]
+                    entries.append(entry)
+                #    self.factory.log[str(v)] = (e[0], e[1])
+                #    v += 1
+                #entries = self.log[pos:]
+                if log_index > 0:
+                    log_term = log_term
+                else:
+                    log_term = 0 
+                #prevLogTerm == IF prevLogIndex > 0 THEN
+                #              log[i][prevLogIndex].term
+                #          ELSE
+                #              0
+                msg = ("AppendEntries", self.current_term, self.name, log_index, log_term, entries, commit_index)
                 c.proto.transport.write(package_data(msg))
 
         self.reset_heartbeat()
@@ -457,12 +485,19 @@ class MeduseFactory(protocol.Factory):
 
         ## Set the heartbeats
         self.state = LEADER
-        self.reset_heartbeat()
 
         # Initialize your view of the others
         (log_term, log_index, _) = self.get_last_log()
-        self.next_index = [log_index] * len(self.others)
-        self.match_index = [-1] * len(self.others)
+        self.next_index = {}
+        self.match_index = {}
+        print "Others!", self.others
+        for (host, port, name) in self.others:
+            print "others:", (host, port, name)
+            self.next_index[name] = log_index
+            self.match_index[name] = -1
+        self.reset_heartbeat()
+        #self.next_index = [log_index] * len(self.others)
+        #self.match_index = [-1] * len(self.others)
 
     def set_persistant(self, term, vote):
         self.current_term = term
@@ -616,10 +651,12 @@ def test_leader_heartbeat():
     clock = Clock()
     
     factory = MeduseFactory("node0", reactor=clock)
+    factory.others.append(("127.0.0.1", 8080, "foo1"))
 
     ## Put in candidate state
     factory.start_leader_election()
-    client_factory = LeaderClientFactory(factory, ("127.0.0.1", 8080, "foo1"))
+    #client_factory = LeaderClientFactory(factory, ("127.0.0.1", 8080, "foo1"))
+    client_factory = factory.conn[0]
 
     instance = client_factory.buildProtocol(None)
     tr = proto_helpers.StringTransport()
@@ -632,6 +669,8 @@ def test_leader_heartbeat():
     assert factory.state == LEADER
 
     print factory.conn
+    for c in factory.conn:
+        print c.client_info
     assert len(factory.conn) == 1
     print factory.election_timeout, factory.match_index, factory.next_index
 
