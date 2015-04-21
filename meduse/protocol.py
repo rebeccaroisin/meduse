@@ -445,8 +445,6 @@ class MeduseFactory(protocol.Factory):
         for c in self.conn:
             if c.proto is not None:
                 (_, _, name) = c.client_info
-                print "Here is the stuff!", c.client_info
-                print "here is the dict", self.next_index.keys()
                 log_index = self.next_index[name] - 1
 
                 # lastEntry == Min({Len(log[i]), nextIndex[i][j]})
@@ -454,7 +452,6 @@ class MeduseFactory(protocol.Factory):
                 last_entry = min(len(self.log), self.next_index[name])
                 commit_index = min(self.commit_index, last_entry)
                 pos = self.next_index[name]
-                print "pos = ", pos, self.log
                 # put all of the log entries into the message
                 entries = []
                 for e in range(pos, len(self.log.keys()) - 1):
@@ -490,9 +487,7 @@ class MeduseFactory(protocol.Factory):
         (log_term, log_index, _) = self.get_last_log()
         self.next_index = {}
         self.match_index = {}
-        print "Others!", self.others
         for (host, port, name) in self.others:
-            print "others:", (host, port, name)
             self.next_index[name] = log_index
             self.match_index[name] = -1
         self.reset_heartbeat()
