@@ -97,17 +97,21 @@ class MeduseLeaderProtocol(protocol.Protocol):
                 #/\ matchIndex' = [matchIndex EXCEPT ![i][j] = m.mmatchIndex]
                 (_, _, name) = self.leader_factory.client_info
                 self.factory.next_index[name] = match_index + 1
-                self.factory.match_index = match_index
+                self.factory.match_index[name] = match_index
+
+                # check if commit index can be updated
+                self.factory.advance_commit_index()
+
                 return
 
             elif success == False:
                 # decrement match index
                 #nextIndex' = [nextIndex EXCEPT ![i][j] =
                 #               Max({nextIndex[i][j] - 1, 1})]
+                (_, _, name) = self.leader_factory.client_info
                 new_match = min(match_index-1, 1)
-                self.factory.match_index = new_match
-
-
+                self.factory.match_index[name] = new_match
+                return
 
 
 ## Factories to connect to the other raft peers
@@ -313,7 +317,6 @@ class MeduseProtocol(protocol.Protocol):
                         ## TODO append entries
                         # return
 
-
         else:
             assert False
 
@@ -374,6 +377,14 @@ class MeduseFactory(protocol.Factory):
         self.election_timeout = None
         self.reset_election_timeout(delta=5)
 
+
+    def advance_commit_index(self):
+        values = self.match_index.values() # match index for other nodes
+        values.append(self.match_index) # match index for leader
+        values.sort()
+        mid_pos = (len(values) / 2) + 1
+        commit_index = values[mid_pos]
+        self.commit_index = commit_index
 
     def get_last_log(self):
         if self.commit_index == -1:
@@ -658,6 +669,9 @@ def test_leader_backoff():
     assert factory.state == FOLLOWER
 
     factory.debug_cleanup() 
+
+def test_leader_response():
+    pass
 
 
 def test_leader_heartbeat():
